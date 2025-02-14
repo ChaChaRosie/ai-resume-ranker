@@ -1,3 +1,29 @@
+#!/usr/bin/env python3
+
+"""
+README:
+ 1) Ensure you have all required libraries installed:
+    pip install openai pandas PyPDF2 ftfy openpyxl
+
+ 2) Set environment variables (optional if you want custom paths):
+    export OPENAI_API_KEY="your-key-here"
+    export INPUT_CSV_PATH="path/to/Applicant_Mapping_File.csv"
+    export INTERMEDIATE_CSV_PATH="path/to/Applicant_Mapping_File_Updated.csv"
+    export SKILL_MATRIX_FILE="path/to/Job_Skills_Measurement_Matrix.xlsx"
+    export JOB_DESCRIPTION_FILE="path/to/Job_Description.pdf"
+    export FINAL_OUTPUT_DIR="path/to/output_directory"
+    export FINAL_OUTPUT_FILENAME="Applicant_Mapping_File_Evaluated.csv"
+
+ 3) Run the script:
+    python3 resume_redact_score.py
+
+This script:
+ - Reads resumes from a CSV of file paths, calls GPT to *redact* personal info,
+   and saves an updated CSV with cleansed text.
+ - Reads a skill matrix + job description, calls GPT to *score* each resume,
+   and writes the final scores to a new CSV.
+"""
+
 import os
 import sys
 import csv
@@ -12,24 +38,43 @@ import string
 from io import StringIO
 
 # --------------------------------------------------------------------------------
-# 1) CONFIGURATION: API KEY & FILE PATHS
+# 1) CONFIGURATION: API KEY & FILE PATHS (via env vars or defaults)
 # --------------------------------------------------------------------------------
-# Using the exact API key from your original scripts:
-openai.api_key = "ADD API KEY"
 
-# ---------- First Stage (Redaction) Paths ----------
-INPUT_CSV_PATH = "/Users/beaganfamily/Documents/AI Project/Applicant Mapping File/Applicant_Mapping_File_Pathways.csv"
-INTERMEDIATE_CSV_PATH = "/Users/beaganfamily/Documents/AI Project/Resume Output/Applicant_Mapping_File_Updated.csv"
+# Load API key from environment variable:
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise ValueError(
+        "OpenAI API key not found. "
+        "Please set the OPENAI_API_KEY environment variable."
+    )
+openai.api_key = OPENAI_API_KEY
 
-# ---------- Second Stage (Scoring) Paths ----------
-SKILL_MATRIX_FILE = "/Users/beaganfamily/Documents/AI Project/Jobs Skills Measurement Matrix/Job_Skills_Measurement_Matrix_V1.xlsx"
-JOB_DESCRIPTION_FILE = "/Users/beaganfamily/Documents/AI Project/Job Description/Software Engineering Manager.pdf"
-FINAL_OUTPUT_DIR = "/Users/beaganfamily/Documents/AI Project/Scored Resumes Output"
-FINAL_OUTPUT_FILENAME = "Applicant_Mapping_File_Evaluated.csv"
+# ----- First Stage (Redaction) Paths -----
+INPUT_CSV_PATH = os.environ.get("INPUT_CSV_PATH", "Applicant_Mapping_File.csv")
+INTERMEDIATE_CSV_PATH = os.environ.get(
+    "INTERMEDIATE_CSV_PATH", "Applicant_Mapping_File_Updated.csv"
+)
+
+# ----- Second Stage (Scoring) Paths -----
+SKILL_MATRIX_FILE = os.environ.get(
+    "SKILL_MATRIX_FILE", "Job_Skills_Measurement_Matrix_V1.xlsx"
+)
+JOB_DESCRIPTION_FILE = os.environ.get(
+    "JOB_DESCRIPTION_FILE", "Software_Engineering_Manager.pdf"
+)
+FINAL_OUTPUT_DIR = os.environ.get("FINAL_OUTPUT_DIR", "Scored_Resumes_Output")
+FINAL_OUTPUT_FILENAME = os.environ.get(
+    "FINAL_OUTPUT_FILENAME", "Applicant_Mapping_File_Evaluated.csv"
+)
+
+# (Optional) Customize the GPT model name here:
+GPT_MODEL_NAME = "gpt-4"  # or "gpt-4o" or whichever model you have access to
 
 # --------------------------------------------------------------------------------
 # 2) TEXT CLEANING & PDF EXTRACTION UTILITIES
 # --------------------------------------------------------------------------------
+
 def fix_text_ftfy(text: str) -> str:
     """Use ftfy to fix common encoding issues (mojibake)."""
     return ftfy.fix_text(text)
@@ -47,16 +92,15 @@ def dictionary_replacements(text: str) -> str:
         "−": "-",
         "¬†": " ",
         "Ã©": "é",
-        "Ã¨": "è",
+        "Ãè": "è",
         "Ã¡": "á",
-        "Ã": "À",   # This can conflict if we see multiple combos
+        "Ã": "À",
         "Ä¢": "C",
         "‘": "'",
         "’": "'",
         "“": "\"",
         "”": "\"",
         "…": "...",
-        # Add more if needed
     }
     for bad, good in replacements.items():
         text = text.replace(bad, good)
@@ -83,20 +127,14 @@ def deep_clean_text(text: str) -> str:
       3) Unicode normalization to ASCII
       4) Filter out non-printable chars
     """
-    # 1) Auto-fix with ftfy
     text = fix_text_ftfy(text)
-    # 2) Dictionary pass
     text = dictionary_replacements(text)
-    # 3) Normalize to ASCII
     text = normalize_to_ascii(text)
-    # 4) Filter out anything non-printable
     text = filter_to_printable(text)
     return text
 
 def extract_text_from_pdf(pdf_path: str) -> str:
-    """
-    Extract text from a PDF file, page by page, and clean it using deep_clean_text.
-    """
+    """Extract text from a PDF file, page by page, and clean it."""
     text_content = []
     try:
         with open(pdf_path, 'rb') as file:
@@ -114,6 +152,7 @@ def extract_text_from_pdf(pdf_path: str) -> str:
 # --------------------------------------------------------------------------------
 # 3) GPT CALLS FOR REDACTION
 # --------------------------------------------------------------------------------
+
 def sanitize_gpt_response(response_text: str) -> str:
     """
     Remove common boilerplate phrases GPT might include, such as:
@@ -131,11 +170,11 @@ def sanitize_gpt_response(response_text: str) -> str:
 
 def call_gpt_redaction(full_prompt: str) -> str:
     """
-    Call the GPT-4o model for redacting personal info from resumes.
+    Call the GPT model to redact personal info from resumes.
     """
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4o",
+            model=GPT_MODEL_NAME,
             messages=[
                 {
                     "role": "system",
@@ -161,6 +200,7 @@ def call_gpt_redaction(full_prompt: str) -> str:
 # --------------------------------------------------------------------------------
 # 4) SKILL MATRIX, JOB DESCRIPTION, AND GPT CALLS FOR SCORING
 # --------------------------------------------------------------------------------
+
 def read_skills_from_xlsx(
     xlsx_file,
     sheet_name=None,
@@ -170,10 +210,6 @@ def read_skills_from_xlsx(
 ):
     """
     Reads an Excel file and returns a list of (skill_name, skill_description, skill_weight).
-    :param sheet_name: If None, uses active sheet.
-    :param skill_col_index: Column index (1-based) containing the skill name.
-    :param desc_col_index: Column index (1-based) containing the skill description.
-    :param weight_col_index: Column index (1-based) containing the skill weight.
     """
     print(f"[INFO] Loading workbook from '{xlsx_file}'...")
     wb = openpyxl.load_workbook(xlsx_file)
@@ -192,10 +228,8 @@ def read_skills_from_xlsx(
     for row in ws.iter_rows(values_only=True):
         row_count += 1
         if first_row:
-            # Skip header row (assuming your file has headers)
             first_row = False
             continue
-
         if not row or row[skill_col_index - 1] is None:
             continue
 
@@ -218,15 +252,11 @@ def read_skills_from_xlsx(
     return skills_list
 
 def read_pdf_text(pdf_path):
-    """
-    Reads all text from a PDF file and returns it as a single string.
-    """
+    """Reads all text from a PDF file and returns it as a single string."""
     try:
         with open(pdf_path, "rb") as pdf_file:
             reader = PyPDF2.PdfReader(pdf_file)
-            pages_text = []
-            for page in reader.pages:
-                pages_text.append(page.extract_text() or "")
+            pages_text = [page.extract_text() or "" for page in reader.pages]
             return "\n".join(pages_text)
     except FileNotFoundError:
         print(f"[ERROR] PDF file not found at: {pdf_path}")
@@ -237,17 +267,17 @@ def read_pdf_text(pdf_path):
 
 def call_gpt_scoring(full_prompt):
     """
-    Call the GPT-4o model for scoring the resume based on the skill matrix.
+    Call the GPT model to score the resume based on the skill matrix.
     """
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4o",
+            model=GPT_MODEL_NAME,
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "You are a specialized resume-evaluation assistant. "
-                        "You provide only the CSV-formatted answer, without additional explanation."
+                        "You provide only the CSV-formatted answer, with no extra commentary."
                     )
                 },
                 {"role": "user", "content": full_prompt}
@@ -266,10 +296,12 @@ def call_gpt_scoring(full_prompt):
 def extract_csv_from_backticks(response_str):
     """
     Extracts the first match of text contained within triple backticks (```...```).
+    Returns the raw string inside those backticks. If none found, returns entire string.
     """
     matches = re.findall(r'```(?:csv|plaintext)?\s*(.*?)\s*```', response_str, flags=re.DOTALL)
     if matches:
         content = matches[0]
+        # Convert multiline to single-line to help CSV parsing
         single_line = " ".join(content.splitlines())
         return single_line.strip()
     else:
@@ -293,7 +325,7 @@ def main():
     """
     1) Redact PDF text -> produce an intermediate CSV with 'cleansed' column.
     2) Read skill matrix & job description -> read cleansed resumes -> run scoring.
-    3) Produce final CSV with skill scores, summary, overall score.
+    3) Produce final CSV with skill scores, summary, and overall score.
     """
     # -------------------------------------------------------------------
     # STEP A: REDACT AND PRODUCE INTERMEDIATE CSV
@@ -352,7 +384,7 @@ def main():
     print("\n[INFO] Reading skills from XLSX...")
     skills_data = read_skills_from_xlsx(
         xlsx_file=SKILL_MATRIX_FILE,
-        sheet_name=None,      # or specify sheet name
+        sheet_name=None,      # or specify a specific sheet name if needed
         skill_col_index=1,    # adjust as needed
         desc_col_index=2,     # adjust as needed
         weight_col_index=3    # adjust as needed
@@ -411,7 +443,6 @@ Output ONLY one line of CSV (no extra commentary or markup).
         print(f"[ERROR] Unexpected error reading the intermediate CSV: {e}")
         sys.exit(1)
 
-    # Convert to dict-rows so we can iterate easily
     rows = df2.to_dict(orient='records')
 
     # We'll append new columns: <SkillName>_Score for each skill + "Summary" + "Overall_Score"
@@ -460,7 +491,7 @@ Output ONLY one line of CSV (no extra commentary or markup).
                 for idx_s, skill_name in enumerate(skill_names, start=1):
                     score_str = parsed_fields[idx_s]
                     row_dict[f"{skill_name}_Score"] = score_str
-                # Summary is last
+                # Summary is the last field
                 summary_str = parsed_fields[-1]
                 row_dict["Summary"] = summary_str
 
@@ -499,5 +530,6 @@ Output ONLY one line of CSV (no extra commentary or markup).
 # --------------------------------------------------------------------------------
 # 6) EXECUTE SCRIPT
 # --------------------------------------------------------------------------------
+
 if __name__ == "__main__":
     main()
